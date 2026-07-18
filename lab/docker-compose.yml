@@ -1,0 +1,127 @@
+services:
+  # VULNERABLE: WordPress 7.0.1
+  wp-vulnerable:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WP_VERSION: "7.0.1"
+    image: wp2shell-vulnerable:latest
+    container_name: wp2shell-vulnerable
+    hostname: wp-vulnerable
+    networks:
+      - wp2shell-net
+    ports:
+      - "127.0.0.1:8081:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql-vulnerable
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wp2shell_local_only
+      WORDPRESS_TABLE_PREFIX: wp_
+      WP_AUTO_UPDATE_CORE: "false"
+    volumes:
+      - ./wp-config-vulnerable.php:/var/www/html/wp-config.php
+      - ./php-overrides.ini:/usr/local/etc/php/conf.d/zzz-custom.ini
+    depends_on:
+      mysql-vulnerable:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/wp-json/wp/v2/posts?per_page=1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  mysql-vulnerable:
+    image: mysql:8.0
+    container_name: wp2shell-mysql-vulnerable
+    hostname: mysql-vulnerable
+    networks:
+      - wp2shell-net
+    ports:
+      - "127.0.0.1:3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: wp2shell_root_local_only
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wp2shell_local_only
+    volumes:
+      - wp2shell-mysql-vulnerable:/var/lib/mysql
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pwp2shell_root_local_only"]
+      timeout: 5s
+      interval: 5s
+      retries: 10
+
+  # FIXED: WordPress 7.0.2
+  wp-fixed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WP_VERSION: "7.0.2"
+    image: wp2shell-fixed:latest
+    container_name: wp2shell-fixed
+    hostname: wp-fixed
+    networks:
+      - wp2shell-net
+    ports:
+      - "127.0.0.1:8082:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql-fixed
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wp2shell_local_only
+      WORDPRESS_TABLE_PREFIX: wp_
+      WP_AUTO_UPDATE_CORE: "false"
+    volumes:
+      - ./wp-config-fixed.php:/var/www/html/wp-config.php
+      - ./php-overrides.ini:/usr/local/etc/php/conf.d/zzz-custom.ini
+    depends_on:
+      mysql-fixed:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/wp-json/wp/v2/posts?per_page=1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  mysql-fixed:
+    image: mysql:8.0
+    container_name: wp2shell-mysql-fixed
+    hostname: mysql-fixed
+    networks:
+      - wp2shell-net
+    ports:
+      - "127.0.0.1:3308:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: wp2shell_root_local_only
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wp2shell_local_only
+    volumes:
+      - wp2shell-mysql-fixed:/var/lib/mysql
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pwp2shell_root_local_only"]
+      timeout: 5s
+      interval: 5s
+      retries: 10
+
+volumes:
+  wp2shell-mysql-vulnerable:
+    name: wp2shell-mysql-vulnerable
+  wp2shell-mysql-fixed:
+    name: wp2shell-mysql-fixed
+
+networks:
+  wp2shell-net:
+    name: wp2shell-net
+    driver: bridge
